@@ -9,6 +9,14 @@
   min-height: 0;
   min-width: 0;
 }
+.settings-key-skill {
+  flex-shrink: 0;
+  margin-bottom: 16px;
+}
+/* Bot's body sits low in its box, and Windows sets CJK text high in the line. */
+.settings-key-skill .fuwari-callout-icon {
+  translate: 0 -3px;
+}
 .settings-key-list {
   overflow: auto;
   flex: 1;

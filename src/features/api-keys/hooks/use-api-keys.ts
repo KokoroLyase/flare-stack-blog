@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { authClient } from "@/lib/auth/auth-client";
+import { getAuthClient } from "@/lib/auth/auth-client";
 import { m } from "@/paraglide/messages";
 
-const API_KEYS_QUERY_KEY = ["auth", "api-keys"] as const;
+export const API_KEYS_QUERY_KEY = ["auth", "api-keys"] as const;
 
-type ApiKeyListItem = {
+export type ApiKeyListItem = {
   id: string;
   name?: string | null;
   start?: string | null;
   createdAt: Date | string;
+  lastRequest?: Date | string | null;
+  metadata?: unknown;
 };
 
 function readListedKeys(data: unknown): ApiKeyListItem[] {
@@ -32,7 +34,7 @@ export function useApiKeys() {
   const listQuery = useQuery({
     queryKey: API_KEYS_QUERY_KEY,
     queryFn: async () => {
-      const { data, error } = await authClient.apiKey.list({
+      const { data, error } = await getAuthClient().apiKey.list({
         query: { sortBy: "createdAt", sortDirection: "desc" },
       });
       if (error) throw error;
@@ -43,7 +45,7 @@ export function useApiKeys() {
 
   const createMutation = useMutation({
     mutationFn: async (name: string) => {
-      const { data, error } = await authClient.apiKey.create({ name });
+      const { data, error } = await getAuthClient().apiKey.create({ name });
       if (error) throw error;
       if (!data?.key) {
         throw new Error("missing key");
@@ -59,13 +61,13 @@ export function useApiKeys() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (keyId: string) => {
-      const { error } = await authClient.apiKey.delete({ keyId });
+    mutationFn: async ({ keyId }: { keyId: string; quiet?: boolean }) => {
+      const { error } = await getAuthClient().apiKey.delete({ keyId });
       if (error) throw error;
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, { quiet }) => {
       await queryClient.invalidateQueries({ queryKey: API_KEYS_QUERY_KEY });
-      toast.success(m.settings_api_keys_toast_delete_success());
+      if (!quiet) toast.success(m.settings_api_keys_toast_delete_success());
     },
     onError: () => {
       toast.error(m.settings_api_keys_toast_delete_fail());
@@ -79,7 +81,9 @@ export function useApiKeys() {
     reload: listQuery.refetch,
     createKey: createMutation.mutateAsync,
     isCreating: createMutation.isPending,
-    deleteKey: deleteMutation.mutateAsync,
+    /** `quiet` leaves the success toast to a caller that shows its own. */
+    deleteKey: (keyId: string, options: { quiet?: boolean } = {}) =>
+      deleteMutation.mutateAsync({ keyId, ...options }),
     isDeleting: deleteMutation.isPending,
   };
 }

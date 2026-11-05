@@ -7,6 +7,7 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import packageJson from "./package.json";
+import { routedFirstSegmentsPlugin } from "./scripts/vite-routed-segments.ts";
 
 const config = defineConfig({
   define: {
@@ -36,6 +37,7 @@ const config = defineConfig({
       // Read the Worker from cloudflare.config.ts instead of wrangler.jsonc.
       experimental: { newConfig: true },
     }),
+    routedFirstSegmentsPlugin(),
     tailwindcss(),
     devtools(),
     tanstackStart(),

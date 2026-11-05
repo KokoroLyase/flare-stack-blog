@@ -11,6 +11,8 @@ export type WorkersCachePurgeTarget =
 
 const HTML_TAG = "html";
 const POSTS_TAG = "posts";
+// Only the pages that render view counts or the popular ranking.
+const POPULARITY_TAG = "popularity";
 const FRIEND_LINKS_TAG = "friend-links";
 
 const SITE_DOCUMENTS_WITH_POSTS = new Set([
@@ -31,6 +33,11 @@ function normalizePathname(pathname: string): string {
 
 function postCacheTag(slug: string): string {
   return `post:${encodeURIComponent(slug)}`;
+}
+
+// Every cached response for one Media key, original and transforms alike.
+function mediaCacheTag(key: string): string {
+  return `media:${encodeURIComponent(key)}`;
 }
 
 export function workersCacheKey(url: string | URL): string {
@@ -69,7 +76,7 @@ export function workersCachePolicy(pathname: string): WorkersCachePolicy {
   const path = normalizePathname(pathname);
 
   if (path === "/") {
-    return { cache: "public", tags: [HTML_TAG, POSTS_TAG] };
+    return { cache: "public", tags: [HTML_TAG, POSTS_TAG, POPULARITY_TAG] };
   }
   if (path === "/posts") {
     return { cache: "public", tags: [HTML_TAG, POSTS_TAG] };
@@ -90,7 +97,9 @@ export function workersCachePolicy(pathname: string): WorkersCachePolicy {
     return { cache: "public", tags: [] };
   }
   if (path.startsWith("/images/")) {
-    return { cache: "public", tags: [] };
+    // The image route reads the key from the raw path, as here.
+    const key = path.slice("/images/".length);
+    return { cache: "public", tags: key ? [mediaCacheTag(key)] : [] };
   }
 
   const postMatch = /^\/post\/(.+)$/.exec(path);
@@ -115,6 +124,9 @@ export function purgeOptionsFor(
   if (reason === "all") {
     return { purgeEverything: true };
   }
+  if (reason === "post-popularity.updated") {
+    return { tags: [POPULARITY_TAG] };
+  }
   if (reason === "site-config.changed") {
     return { tags: [HTML_TAG] };
   }
@@ -131,6 +143,14 @@ export function purgeOptionsFor(
     return { tags: [POSTS_TAG, postCacheTag(params.slug)] };
   }
   return { tags: [POSTS_TAG] };
+}
+
+/**
+ * Replacing a Media file keeps its key and every address that names it, so
+ * the cached copies of that key go instead (ADR 0009 purges by Cache-Tag).
+ */
+export function mediaPurgeTarget(key: string): WorkersCachePurgeTarget {
+  return { tags: [mediaCacheTag(key)] };
 }
 
 export function applyWorkersCachePolicy(

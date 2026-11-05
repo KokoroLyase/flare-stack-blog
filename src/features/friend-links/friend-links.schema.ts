@@ -2,13 +2,9 @@ import { createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
 import { FriendLinksTable } from "@/lib/db/schema";
 import type { Messages } from "@/lib/i18n";
-
-const coercedDate = z.union([z.date(), z.string().pipe(z.coerce.date())]);
-
-const FriendLinkSelectSchema = createSelectSchema(FriendLinksTable, {
-  createdAt: coercedDate,
-  updatedAt: coercedDate,
-});
+import { PageOffsetSchema, pageLimitSchema } from "@/lib/orpc/pagination";
+import { coercedDate } from "@/lib/orpc/dates";
+import { PathIdSchema } from "@/lib/orpc/path-ids";
 
 const FriendLinkUserSchema = z.object({
   id: z.string(),
@@ -16,9 +12,25 @@ const FriendLinkUserSchema = z.object({
   image: z.string().nullable(),
 });
 
-const FriendLinkWithUserSchema = FriendLinkSelectSchema.extend({
-  user: FriendLinkUserSchema.nullable(),
-});
+// drizzle-zod walks every column when it builds a schema (about 3 ms), and this
+// module is imported by the public pages. z.lazy builds it on first parse, and
+// only once, so the cost moves to the callers that actually validate a row.
+const FriendLinkWithUserSchema = z.lazy(() =>
+  createSelectSchema(FriendLinksTable, {
+    createdAt: coercedDate,
+    updatedAt: coercedDate,
+  }).extend({
+    user: FriendLinkUserSchema.nullable(),
+  }),
+);
+
+/** A friend link row alone, as the admin write operations return it. */
+export const FriendLinkSchema = z.lazy(() =>
+  createSelectSchema(FriendLinksTable, {
+    createdAt: coercedDate,
+    updatedAt: coercedDate,
+  }),
+);
 
 const friendLinkFields = {
   siteName: z.string().min(1).max(100),
@@ -67,25 +79,25 @@ export const createSubmitFriendLinkSchema = (m: Messages) =>
 
 // === Admin create input (manual add) ===
 
-export const CreateFriendLinkInputSchema = z.object(friendLinkFields);
+export const CreateFriendLinkInputSchema = z.strictObject(friendLinkFields);
 
 export const createCreateFriendLinkSchema = (m: Messages) =>
   z.object(createFriendLinkFormFields(m));
 
 // === Admin inputs ===
-export const GetAllFriendLinksInputSchema = z.object({
+export const GetAllFriendLinksInputSchema = z.strictObject({
   search: z.string().max(200).optional(),
-  offset: z.number().optional(),
-  limit: z.number().optional(),
+  offset: PageOffsetSchema.optional(),
+  limit: pageLimitSchema(100).optional(),
   status: z.enum(["pending", "approved", "rejected"]).optional(),
 });
 
-export const ApproveFriendLinkInputSchema = z.object({
-  id: z.number(),
+export const ApproveFriendLinkInputSchema = z.strictObject({
+  id: PathIdSchema,
 });
 
-export const RejectFriendLinkInputSchema = z.object({
-  id: z.number(),
+export const RejectFriendLinkInputSchema = z.strictObject({
+  id: PathIdSchema,
   rejectionReason: z.string().max(500).optional(),
 });
 
@@ -97,7 +109,7 @@ export const RejectFriendLinkInputSchema = z.object({
  */
 export const UpdateFriendLinkInputSchema = z
   .object({
-    id: z.number(),
+    id: PathIdSchema,
     siteName: friendLinkFields.siteName.optional(),
     siteUrl: friendLinkFields.siteUrl.optional(),
     description: friendLinkFields.description,
@@ -105,8 +117,8 @@ export const UpdateFriendLinkInputSchema = z
   })
   .strict();
 
-export const DeleteFriendLinkInputSchema = z.object({
-  id: z.number(),
+export const DeleteFriendLinkInputSchema = z.strictObject({
+  id: PathIdSchema,
 });
 
 // === Cache ===

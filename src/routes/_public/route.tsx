@@ -7,8 +7,9 @@ import {
 import { useEffect } from "react";
 import { PublicLayout as SitePublicLayout } from "@/components/layout/public-layout";
 import { Toaster } from "@/components/layout/toaster";
+import { NameGate } from "@/features/auth/components/name-gate";
 import { useLogout } from "@/features/auth/hooks/use-logout";
-import { authClient } from "@/lib/auth/auth-client";
+import { useSession } from "@/lib/auth/auth-client";
 import { CACHE_CONTROL } from "@/lib/constants";
 import { clientEnv } from "@/lib/env/client.env";
 import { isExternalNavHref } from "@/features/config/utils/nav-links";
@@ -17,7 +18,7 @@ import { m } from "@/paraglide/messages";
 export const Route = createFileRoute("/_public")({
   component: PublicLayout,
   headers: () => {
-    return CACHE_CONTROL.public;
+    return CACHE_CONTROL.html;
   },
   head: () => {
     const env = clientEnv();
@@ -38,8 +39,7 @@ export const Route = createFileRoute("/_public")({
 function PublicLayout() {
   const navigate = useNavigate();
   const { siteConfig } = useRouteContext({ from: "__root__" });
-  const { data: session, isPending: isSessionPending } =
-    authClient.useSession();
+  const { data: session, isPending: isSessionPending } = useSession();
   const { logout } = useLogout();
 
   const navOptions = [
@@ -82,6 +82,7 @@ function PublicLayout() {
       >
         <Outlet />
       </SitePublicLayout>
+      <NameGate user={session?.user} logout={logout} />
       <Toaster />
     </>
   );

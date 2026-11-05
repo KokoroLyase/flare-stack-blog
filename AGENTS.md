@@ -6,7 +6,7 @@ Repo-local configuration for engineering skills.
 
 ### Issue tracker
 
-Issues and PRDs are tracked in GitHub Issues on `du2333/flare-stack-blog`, with tickets as sub-issues of their spec. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked in GitHub Issues on `du2333/flare-stack-blog`, with tickets as sub-issues of their spec. See `docs/agents/issue-tracker.md`. Dispatching a ticket to a subagent: build the brief from `docs/agents/subagent-brief.md`.
 
 ### Triage labels
 

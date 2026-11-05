@@ -33,7 +33,6 @@ function RouteComponent() {
 
   const loginForm = useLoginForm({
     turnstileToken,
-    turnstilePending,
     resetTurnstile,
     redirectTo: resolvedRedirectTo,
   });
