@@ -2,6 +2,7 @@ import { ORPCError } from "@orpc/client";
 import { StandardOpenAPIMatcher } from "@orpc/openapi/standard";
 import { onError } from "@orpc/server";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
+import skillRevision from "@/features/agent-skill/skill-revision.json";
 import { MAX_FILE_SIZE } from "@/features/media/media.schema";
 import {
   bodyLimitOf,
@@ -54,9 +55,10 @@ Every Post carries an opaque \`saveToken\`, returned by each read of the Post an
 
 Post and Post Revision reads take the query parameter \`contentFormat=markdown\`, and saves the body field \`"contentFormat": "markdown"\` (default \`json\`, TipTap JSON); they then answer \`contentMarkdown\` (null when the Post has no body) in place of \`contentJson\`. Reading a Post by id with it also answers its published body as \`publicSnapshotContentMarkdown\` in place of \`publicSnapshotContentJson\`, so the draft and what is published compare in one read. Creating and saving take either \`contentJson\` or \`contentMarkdown\` in \`data\`; sending both answers 400. Markdown is CommonMark with GFM tables, strikethrough and autolinks, parsed as the editor parses pasted Markdown; reads serialize back to the same form:
 
-- It carries headings, bold, italic, underline as \`++text++\`, strikethrough, inline code, links, nested bullet and numbered lists, block quotes, horizontal rules, hard line breaks, tables, images and videos. Task list markers, footnotes and HTML stay plain text, and front matter is dropped.
+- It carries headings, bold, italic, underline as \`++text++\`, strikethrough, inline code, links, nested bullet and numbered lists, block quotes, horizontal rules, hard line breaks, tables, images and videos. Task list markers, footnotes and any other HTML stay plain text, and front matter is dropped.
 - Headings are levels 2 to 4: when the Markdown has an H1, every heading moves one level down, and anything deeper than level 4 becomes level 4.
 - A Bilibili or YouTube address alone in a paragraph, bare or in \`<>\`, is a video block; a \`[text](address)\` link stays a link, even when its text is the address. A video's title, cover and duration are looked up on write and left empty when the lookup fails.
+- A Direct Video, a video file at any https address played by the reader's browser, is a line holding exactly one tag \`<video src="…" poster="…" title="…" data-page="…"></video>\`: \`src\` is the file and required, \`poster\` its poster image, \`title\` its title and \`data-page\` the page it came from, in any order, each optional but \`src\`, with quoted, HTML-escaped values. Every address must be https without a user name or password: a \`src\` that is not, or any other attribute, leaves the line as plain text, and a \`poster\` or \`data-page\` that is not is dropped. Nothing is looked up on write; the duration is kept from the body being replaced when the same \`src\` was there. In \`contentJson\` a Direct Video is a \`video\` node with \`provider: "direct"\` and \`src\`, \`cover\` and \`pageUrl\`, and an address there that is not https answers 400 \`CONTENT_LINK_INVALID\` naming it.
 - Tables keep column alignment, and a table cell holds a single line: merged cells are written as separate cells and read back unmerged, a cell's paragraphs and line breaks are joined with \`<br>\`, which reads back as text, and a list in a cell reads back as text. Column widths are not carried, so a Markdown write resets them to equal.
 - Inline math is \`$…$\`; block math has \`$$\` alone on the lines before and after it.
 - Fenced code blocks carry their language; a \`mermaid\` block renders as a diagram.
@@ -66,6 +68,14 @@ Post and Post Revision reads take the query parameter \`contentFormat=markdown\`
 ## Media
 
 Upload a file as multipart form data to the Media upload operation; its answer carries the \`/images/{key}\` path to use in Markdown and as a Post's cover. Media that a Post, a Public Content Snapshot or a Post Revision uses cannot be deleted. Replacing a Media file keeps its key and path, so it takes effect at once, without publishing, on every Post that shows it, Published Posts included; the Media's \`fileName\` becomes the uploaded file's name. Deleting unused Media, rebuilding the search index and purging caches act on the whole site.
+
+## Moments
+
+A Moment is a short public post with no title, slug, category, tag, draft or history, like a microblog entry. Posting or saving one is public at once, and it is shown under \`/moments\` and \`/moments/{id}\` on the site origin. Its JSON fields are \`text\` (plain text of at most 1000 characters, possibly several lines; web addresses in it become links), \`images\` (up to 50 Media paths, \`/images/{key}\`, in display order) and \`video\` (one video: \`{ url }\` for Bilibili or YouTube, or \`{ src, poster?, title?, page? }\` for a Direct Video). A Moment has images or a video, never both, and is never empty. An image must already be Media: upload the file to the Media upload operation first, then write the path it answers; a path no Media has answers 400. Media a Moment shows cannot be deleted. \`postedAt\` is when it was first posted and edits never change it; \`updatedAt\` is its last write. Saving sends only the changed fields in \`data\`, and \`saveToken\` works as for Posts: read the Moment right before saving, send the \`saveToken\` you read, and on 409 \`EDIT_CONFLICT\` read it again before deciding, never resending the same token. The Admin Moments operations list their exact fields and errors.
+
+## Agent Skill
+
+This blog serves revision ${skillRevision.revision} of the \`flare-stack-blog\` Agent Skill at \`/agent-skill.zip\` on the site origin, a public file. A copy of the Skill that states a lower revision, or none, is older than this blog: tell the human, and when they agree replace the copy with the zip's \`flare-stack-blog\` folder and read it again.
 
 ## Errors
 

@@ -1,3 +1,4 @@
+import { publicCommentPath } from "@/features/comments/comment-url";
 import { resolveSystemConfig } from "@/features/config/config.resolve";
 import * as ConfigRepo from "@/features/config/data/config.data";
 import * as DashboardRepo from "@/features/dashboard/data/dashboard.data";
@@ -6,9 +7,7 @@ import {
   commentSnippet,
   DASHBOARD_PENDING_FRIEND_LINKS_LIMIT,
   DASHBOARD_RECENT_COMMENT_DAYS,
-  DASHBOARD_RECENT_POSTS_LIMIT,
   DASHBOARD_TOP_POST_CANDIDATES,
-  DASHBOARD_UNREPLIED_COMMENTS_LIMIT,
   DASHBOARD_WRITING_LOOKBACK_DAYS,
   popularityAlertFromStatus,
   popularityState,
@@ -16,12 +15,17 @@ import {
   siteIdentityIsDefault,
   totalViews,
 } from "@/features/dashboard/dashboard";
+import {
+  DASHBOARD_RECENT_POSTS_LIMIT,
+  DASHBOARD_UNREPLIED_COMMENTS_LIMIT,
+} from "@/features/dashboard/dashboard-limits";
 import type {
   DashboardComment,
   DashboardOverview,
   UnrepliedCommentsInput,
 } from "@/features/dashboard/dashboard.schema";
 import * as FriendLinkRepo from "@/features/friend-links/data/friend-links.data";
+import { momentHeading } from "@/features/moments/utils/moment-heading";
 import { isMuted } from "@/features/muted-users/muted-users";
 import { postPopularityService } from "@/features/post-popularity/service/post-popularity.service";
 import * as PostRepo from "@/features/posts/data/posts.data";
@@ -43,6 +47,7 @@ async function getPopularity(context: DbContext) {
         windowEnd: null,
         totalViews: 0,
         topPosts: [],
+        daily: [],
       },
     };
   }
@@ -60,6 +65,7 @@ async function getPopularity(context: DbContext) {
       windowEnd: snapshot.windowEnd,
       totalViews: totalViews(snapshot.entries),
       topPosts: rankTopPosts(candidates, publicPosts),
+      daily: snapshot.daily,
     },
   };
 }
@@ -96,8 +102,7 @@ export async function getDashboardOverview(
     DashboardRepo.countPublicComments(db, recentCommentsSince),
     FriendLinkRepo.getFriendLinkStatusCounts(db),
     DashboardRepo.findLatestDraft(db),
-    // One extra so the list stays full after leaving out the latest draft.
-    DashboardRepo.listRecentPosts(db, DASHBOARD_RECENT_POSTS_LIMIT + 1),
+    DashboardRepo.listRecentPosts(db, DASHBOARD_RECENT_POSTS_LIMIT),
     FriendLinkRepo.getAllFriendLinks(db, {
       status: "pending",
       limit: DASHBOARD_PENDING_FRIEND_LINKS_LIMIT,
@@ -132,9 +137,7 @@ export async function getDashboardOverview(
     popularity,
     writingActivity,
     latestDraft,
-    recentPosts: recentPosts
-      .filter((post) => post.id !== latestDraft?.id)
-      .slice(0, DASHBOARD_RECENT_POSTS_LIMIT),
+    recentPosts,
     pendingFriendLinks: {
       items: pendingItems.map((item) => ({
         id: item.id,
@@ -158,21 +161,49 @@ export async function getDashboardOverview(
 function toDashboardComments(
   rows: Awaited<ReturnType<typeof DashboardRepo.listUnrepliedComments>>,
 ): Array<DashboardComment> {
-  return rows.flatMap((comment) => {
-    if (!comment.postSlug) return [];
+  return rows.flatMap((comment): Array<DashboardComment> => {
+    const common = {
+      id: comment.id,
+      rootId: comment.rootId,
+      userId: comment.userId,
+      userName: comment.userName,
+      userImage: comment.userImage,
+      userMuted: isMuted(comment.userMutedAt),
+      snippet: commentSnippet(comment.content),
+      createdAt: comment.createdAt,
+    };
+    if (comment.momentId !== null && comment.momentText !== null) {
+      return [
+        {
+          ...common,
+          postId: null,
+          postTitle: null,
+          postSlug: null,
+          momentId: comment.momentId,
+          momentTitle: momentHeading({
+            text: comment.momentText,
+            hasVideo: comment.momentHasVideo,
+          }),
+          commentPath: publicCommentPath(
+            { type: "moment", id: comment.momentId },
+            comment.id,
+          ),
+        },
+      ];
+    }
+    if (!comment.postSlug || comment.postId === null) return [];
     return [
       {
-        id: comment.id,
+        ...common,
         postId: comment.postId,
-        rootId: comment.rootId,
-        userId: comment.userId,
-        userName: comment.userName,
-        userImage: comment.userImage,
-        userMuted: isMuted(comment.userMutedAt),
         postTitle: comment.postTitle,
         postSlug: comment.postSlug,
-        snippet: commentSnippet(comment.content),
-        createdAt: comment.createdAt,
+        momentId: null,
+        momentTitle: null,
+        commentPath: publicCommentPath(
+          { type: "post", slug: comment.postSlug },
+          comment.id,
+        ),
       },
     ];
   });

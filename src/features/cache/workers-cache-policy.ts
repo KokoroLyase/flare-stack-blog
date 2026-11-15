@@ -1,3 +1,9 @@
+import { imageServedFormat } from "@/features/media/utils/media.utils";
+import {
+  hasSessionCookie,
+  hasThemePreviewParams,
+  withoutThemePreviewParams,
+} from "@/features/theme/utils/theme-preview-params";
 import { CACHE_CONTROL } from "@/lib/constants";
 import type { PublicCacheReason } from "./types";
 
@@ -14,12 +20,20 @@ const POSTS_TAG = "posts";
 // Only the pages that render view counts or the popular ranking.
 const POPULARITY_TAG = "popularity";
 const FRIEND_LINKS_TAG = "friend-links";
+// The Moments list pages, the home sidebar's latest Moments, the Moments feeds
+// and the Moments in the sitemap.
+const MOMENTS_TAG = "moments";
 
 const SITE_DOCUMENTS_WITH_POSTS = new Set([
   "/atom.xml",
   "/rss.xml",
   "/feed.json",
-  "/sitemap.xml",
+]);
+
+const SITE_DOCUMENTS_WITH_MOMENTS = new Set([
+  "/moments/atom.xml",
+  "/moments/rss.xml",
+  "/moments/feed.json",
 ]);
 
 const SITE_DOCUMENTS_HTML_ONLY = new Set(["/robots.txt", "/site.webmanifest"]);
@@ -35,18 +49,27 @@ function postCacheTag(slug: string): string {
   return `post:${encodeURIComponent(slug)}`;
 }
 
+// A Moment's own page. Moment ids are never reused, so a deleted Moment's
+// page cannot come back under another.
+function momentCacheTag(id: number | string): string {
+  return `moment:${id}`;
+}
+
 // Every cached response for one Media key, original and transforms alike.
 function mediaCacheTag(key: string): string {
   return `media:${encodeURIComponent(key)}`;
 }
 
-export function workersCacheKey(url: string | URL): string {
+export function workersCacheKey(
+  url: string | URL,
+  accept: string = "",
+): string {
   const parsed = typeof url === "string" ? new URL(url) : url;
   const pathname = parsed.pathname;
-  if (pathname === "/") {
+  if (pathname === "/" || normalizePathname(pathname) === "/moments") {
     const page = parsed.searchParams.get("page");
     return page && page !== "1"
-      ? `/?${new URLSearchParams({ page })}`
+      ? `${pathname}?${new URLSearchParams({ page })}`
       : pathname;
   }
   if (normalizePathname(pathname) === "/posts") {
@@ -66,17 +89,87 @@ export function workersCacheKey(url: string | URL): string {
       const value = parsed.searchParams.get(name);
       if (value) params.set(name, value);
     }
+    // The route answers in the format the Accept header allows, and the
+    // edge cache must not hand one browser another's. Spellings of Accept
+    // that give the same format share the entry; the original needs no part.
+    const format = imageServedFormat(
+      pathname.slice("/images/".length),
+      parsed.searchParams,
+      accept,
+    );
+    if (format) params.set("format", format === "source" ? "original" : format);
     const query = params.toString();
     return query ? `${pathname}?${query}` : pathname;
   }
   return pathname;
 }
 
+/**
+ * The key the edge cache stores a request under. Cached pages name the hashed
+ * assets of the build that rendered them, and a deploy removes those assets,
+ * so each build gets its own keys; images do not depend on the build and keep
+ * theirs across deploys.
+ */
+export function workersEdgeCacheKey(
+  url: string | URL,
+  accept: string,
+  buildId: string,
+): string {
+  const parsed = typeof url === "string" ? new URL(url) : url;
+  const key = workersCacheKey(parsed, accept);
+  return parsed.pathname.startsWith("/images/")
+    ? key
+    : `/_build/${buildId}${key}`;
+}
+
+/**
+ * How the default fetch handler passes a request to the cached `App`
+ * entrypoint. A Theme preview never meets the cache: without a session
+ * cookie its parameters are dropped and the request is an ordinary one, so
+ * anonymous traffic cannot force uncached renders; with one, the request
+ * skips the cache (neither read nor stored) and `App` checks the session.
+ * A request that does meet the cache carries its edge cache key
+ * (`workersEdgeCacheKey`).
+ */
+export type WorkersCacheRoute =
+  | { cache: "lookup"; request: Request; cacheKey: string }
+  | { cache: "bypass"; request: Request };
+
+export function workersCacheRoute(
+  request: Request,
+  buildId: string,
+): WorkersCacheRoute {
+  const url = new URL(request.url);
+  const accept = request.headers.get("Accept") || "";
+  if (!hasThemePreviewParams(url)) {
+    return {
+      cache: "lookup",
+      request,
+      cacheKey: workersEdgeCacheKey(url, accept, buildId),
+    };
+  }
+  if (hasSessionCookie(request.headers)) {
+    return { cache: "bypass", request };
+  }
+  const stripped = withoutThemePreviewParams(url);
+  return {
+    cache: "lookup",
+    request: new Request(stripped, request),
+    cacheKey: workersEdgeCacheKey(stripped, accept, buildId),
+  };
+}
+
 export function workersCachePolicy(pathname: string): WorkersCachePolicy {
   const path = normalizePathname(pathname);
 
   if (path === "/") {
-    return { cache: "public", tags: [HTML_TAG, POSTS_TAG, POPULARITY_TAG] };
+    return {
+      cache: "public",
+      tags: [HTML_TAG, POSTS_TAG, POPULARITY_TAG, MOMENTS_TAG],
+    };
+  }
+  if (path === "/moments") {
+    return { cache: "public", tags: [HTML_TAG, MOMENTS_TAG] };
   }
   if (path === "/posts") {
     return { cache: "public", tags: [HTML_TAG, POSTS_TAG] };
@@ -90,6 +183,12 @@ export function workersCachePolicy(pathname: string): WorkersCachePolicy {
   if (SITE_DOCUMENTS_WITH_POSTS.has(path)) {
     return { cache: "public", tags: [HTML_TAG, POSTS_TAG] };
   }
+  if (path === "/sitemap.xml") {
+    return { cache: "public", tags: [HTML_TAG, POSTS_TAG, MOMENTS_TAG] };
+  }
+  if (SITE_DOCUMENTS_WITH_MOMENTS.has(path)) {
+    return { cache: "public", tags: [HTML_TAG, MOMENTS_TAG] };
+  }
   if (SITE_DOCUMENTS_HTML_ONLY.has(path)) {
     return { cache: "public", tags: [HTML_TAG] };
   }
@@ -100,6 +199,18 @@ export function workersCachePolicy(pathname: string): WorkersCachePolicy {
     // The image route reads the key from the raw path, as here.
     const key = path.slice("/images/".length);
     return { cache: "public", tags: key ? [mediaCacheTag(key)] : [] };
+  }
+
+  const momentMatch = /^\/moments\/(.+)$/.exec(path);
+  if (momentMatch?.[1]) {
+    // Only an id names a Moment; any other address is a page no Moment has,
+    // dropped with the lists.
+    return {
+      cache: "public",
+      tags: /^[1-9][0-9]*$/.test(momentMatch[1])
+        ? [HTML_TAG, momentCacheTag(momentMatch[1])]
+        : [HTML_TAG, MOMENTS_TAG],
+    };
   }
 
   const postMatch = /^\/post\/(.+)$/.exec(path);
@@ -119,10 +230,30 @@ export function workersCachePolicy(pathname: string): WorkersCachePolicy {
 
 export function purgeOptionsFor(
   reason: PublicCacheReason | "all",
-  params: { slug?: string; slugs?: string[] },
+  params: {
+    slug?: string;
+    slugs?: string[];
+    momentId?: number;
+    navigationChanged?: boolean;
+  },
 ): WorkersCachePurgeTarget {
   if (reason === "all") {
     return { purgeEverything: true };
+  }
+  if (reason === "moment.changed") {
+    // Going from no Moments to some, or back, shows or hides Moments in the
+    // navigation of every page; every page with it carries the html tag, the
+    // Moments pages and the home page among them. Otherwise only the lists,
+    // the home sidebar and the Moment's own page show it.
+    if (params.navigationChanged) return { tags: [HTML_TAG] };
+    return {
+      tags: [
+        MOMENTS_TAG,
+        ...(params.momentId === undefined
+          ? []
+          : [momentCacheTag(params.momentId)]),
+      ],
+    };
   }
   if (reason === "post-popularity.updated") {
     return { tags: [POPULARITY_TAG] };
@@ -157,7 +288,11 @@ export function applyWorkersCachePolicy(
   request: Request,
   response: Response,
 ): Response {
-  const policy = workersCachePolicy(new URL(request.url).pathname);
+  const url = new URL(request.url);
+  // Only a bypassing request still has the preview parameters here.
+  const policy: WorkersCachePolicy = hasThemePreviewParams(url)
+    ? { cache: "private" }
+    : workersCachePolicy(url.pathname);
   const headers = new Headers(response.headers);
 
   if (policy.cache === "private") {

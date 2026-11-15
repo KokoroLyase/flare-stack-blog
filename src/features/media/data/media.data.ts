@@ -1,8 +1,23 @@
 import type { SQL } from "drizzle-orm";
-import { and, count, desc, eq, inArray, lt, or, sql, sum } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  inArray,
+  lt,
+  or,
+  sql,
+  sum,
+} from "drizzle-orm";
+import type { MediaSort } from "@/features/media/media.schema";
 import { containsText } from "@/lib/db/text-match";
 import {
   MediaTable,
+  MomentImagesTable,
+  MomentsTable,
   PostMediaTable,
   PostRevisionMediaTable,
   PostRevisionsTable,
@@ -17,12 +32,13 @@ export type Media = typeof MediaTable.$inferSelect;
 const usedAsAdminAvatar = sql`exists (select 1 from ${user} where ${user.role} = 'admin' and instr(${user.image}, '/images/' || ${MediaTable.key}) > 0)`;
 
 // A Post Revision's images count too, so restoring it never brings back a
-// deleted image.
-const unreferenced = sql`not exists (select 1 from ${PostMediaTable} where ${PostMediaTable.mediaId} = ${MediaTable.id}) and not exists (select 1 from ${PostRevisionMediaTable} where ${PostRevisionMediaTable.mediaId} = ${MediaTable.id}) and not ${usedAsAdminAvatar}`;
+// deleted image, and so do a Moment's.
+const unreferenced = sql`not exists (select 1 from ${PostMediaTable} where ${PostMediaTable.mediaId} = ${MediaTable.id}) and not exists (select 1 from ${PostRevisionMediaTable} where ${PostRevisionMediaTable.mediaId} = ${MediaTable.id}) and not exists (select 1 from ${MomentImagesTable} where ${MomentImagesTable.mediaId} = ${MediaTable.id}) and not ${usedAsAdminAvatar}`;
 
 export type MediaListItem = Media & {
   postCount: number;
   revisionOnlyPostCount: number;
+  momentCount: number;
   isCover: boolean;
 };
 
@@ -57,10 +73,10 @@ export async function findMediaByKey(
 
 /**
  * Deletes the Media with `key` unless something uses it: a Post (draft,
- * Public Content Snapshot or cover), a Post Revision or an Admin's avatar.
- * The check and the delete are one statement, so a Post write that records
- * the Media in the meantime (`mediaReferenceGuards`) makes it refuse. Returns
- * whether it deleted.
+ * Public Content Snapshot or cover), a Post Revision, a Moment or an Admin's
+ * avatar. The check and the delete are one statement, so a Post or Moment
+ * write that records the Media in the meantime (`mediaReferenceGuards`,
+ * `moments.data.ts`) makes it refuse. Returns whether it deleted.
  */
 export async function deleteMediaIfUnused(db: DB, key: string) {
   const deleted = await db
@@ -109,6 +125,44 @@ export async function updateMediaFile(
 
 const DEFAULT_PAGE_SIZE = 20;
 
+/**
+ * The cursor is the id of the page's last item under every sort, so it never
+ * changes shape. Newest and oldest order by id, which follows the upload
+ * order; largest orders by size with the id as tie-break, and continues after
+ * the cursor item by comparing against that item's size. An item deleted
+ * between two pages ends a largest list early.
+ */
+function sortPage(sort: MediaSort, cursor: number | undefined, db: DB) {
+  if (sort === "oldest") {
+    return {
+      after: cursor ? gt(MediaTable.id, cursor) : undefined,
+      order: [asc(MediaTable.id)],
+    };
+  }
+  if (sort === "largest") {
+    const cursorSize = sql`(${db
+      .select({ size: MediaTable.sizeInBytes })
+      .from(MediaTable)
+      .where(eq(MediaTable.id, cursor ?? 0))})`;
+    return {
+      after: cursor
+        ? or(
+            sql`${MediaTable.sizeInBytes} < ${cursorSize}`,
+            and(
+              sql`${MediaTable.sizeInBytes} = ${cursorSize}`,
+              lt(MediaTable.id, cursor),
+            ),
+          )
+        : undefined,
+      order: [desc(MediaTable.sizeInBytes), desc(MediaTable.id)],
+    };
+  }
+  return {
+    after: cursor ? lt(MediaTable.id, cursor) : undefined,
+    order: [desc(MediaTable.id)],
+  };
+}
+
 export async function getMediaList(
   db: DB,
   options?: {
@@ -116,6 +170,7 @@ export async function getMediaList(
     limit?: number;
     search?: string;
     unusedOnly?: boolean;
+    sort?: MediaSort;
   },
 ): Promise<{ items: Array<MediaListItem>; nextCursor: number | null }> {
   const {
@@ -123,11 +178,13 @@ export async function getMediaList(
     limit = DEFAULT_PAGE_SIZE,
     search,
     unusedOnly,
+    sort = "newest",
   } = options ?? {};
 
+  const { after, order } = sortPage(sort, cursor, db);
   const conditions: Array<SQL> = [];
-  if (cursor) {
-    conditions.push(lt(MediaTable.id, cursor));
+  if (after) {
+    conditions.push(after);
   }
   if (search) {
     conditions.push(containsText(MediaTable.fileName, search));
@@ -141,7 +198,7 @@ export async function getMediaList(
     .select()
     .from(MediaTable)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(MediaTable.id))
+    .orderBy(...order)
     .limit(limit + 1);
 
   const hasMore = items.length > limit;
@@ -198,7 +255,7 @@ async function withUsage(
   if (items.length === 0) return [];
 
   const ids = items.map((item) => item.id);
-  const [postRows, revisionRows, coverRows] = await Promise.all([
+  const [postRows, revisionRows, coverRows, momentRows] = await Promise.all([
     db
       .select({
         mediaId: PostMediaTable.mediaId,
@@ -229,7 +286,18 @@ async function withUsage(
           inArray(snapshotCoverMediaId, ids),
         ),
       ),
+    db
+      .select({
+        mediaId: MomentImagesTable.mediaId,
+        momentCount: sql<number>`count(distinct ${MomentImagesTable.momentId})`,
+      })
+      .from(MomentImagesTable)
+      .where(inArray(MomentImagesTable.mediaId, ids))
+      .groupBy(MomentImagesTable.mediaId),
   ]);
+  const momentCounts = new Map(
+    momentRows.map((row) => [row.mediaId, Number(row.momentCount)]),
+  );
 
   const groupByMedia = (rows: Array<{ mediaId: number; postId: number }>) => {
     const postIdsById = new Map<number, Set<number>>();
@@ -258,6 +326,7 @@ async function withUsage(
     revisionOnlyPostCount: [...(revisionPostIds.get(item.id) ?? [])].filter(
       (postId) => !currentPostIds.get(item.id)?.has(postId),
     ).length,
+    momentCount: momentCounts.get(item.id) ?? 0,
     isCover: coverIds.has(item.id),
   }));
 }
@@ -268,4 +337,22 @@ export async function deleteUnusedMedia(db: DB): Promise<Array<string>> {
     .where(unreferenced)
     .returning({ key: MediaTable.key });
   return rows.map((row) => row.key);
+}
+
+/**
+ * The Moments that show the image, newest first. A Moment that shows it
+ * twice is listed once.
+ */
+export async function getMomentsByMediaKey(db: DB, key: string) {
+  return await db
+    .selectDistinct({
+      id: MomentsTable.id,
+      text: MomentsTable.text,
+      postedAt: MomentsTable.postedAt,
+    })
+    .from(MomentImagesTable)
+    .innerJoin(MediaTable, eq(MediaTable.id, MomentImagesTable.mediaId))
+    .innerJoin(MomentsTable, eq(MomentsTable.id, MomentImagesTable.momentId))
+    .where(eq(MediaTable.key, key))
+    .orderBy(desc(MomentsTable.postedAt), desc(MomentsTable.id));
 }

@@ -1,9 +1,13 @@
-import { createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
-import { MediaTable, POST_STATUSES } from "@/lib/db/schema";
-import { MEDIA_NAME_MAX_LENGTH } from "@/features/media/utils/media.utils";
+import type { MediaTable } from "@/lib/db/schema";
+import { POST_STATUSES } from "@/lib/enum-values";
+import {
+  MEDIA_NAME_MAX_LENGTH,
+  MEDIA_SORTS,
+} from "@/features/media/utils/media.utils";
 import { IdCursorSchema, pageLimitSchema } from "@/lib/orpc/pagination";
 import { coercedDate } from "@/lib/orpc/dates";
+import type { Equal, Expect } from "@/lib/type-equal";
 import { hasControlCharacter } from "@/lib/unicode-text";
 
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -26,7 +30,8 @@ export const ACCEPTED_IMAGE_TYPES = [
   "image/svg+xml",
 ];
 
-export const MediaSelectSchema = createSelectSchema(MediaTable, {
+export const MediaSelectSchema = z.object({
+  id: z.int(),
   key: z
     .string()
     .describe(
@@ -37,11 +42,21 @@ export const MediaSelectSchema = createSelectSchema(MediaTable, {
     .describe(
       "Address of the file. Use it as the src of an image in a post body. Replacing the file adds a new v query to it so pages that show it load the new file; addresses already in posts keep working and show the new file too.",
     ),
+  fileName: z.string(),
   width: z.number().int().nullable().describe("Pixels. Null when unknown."),
   height: z.number().int().nullable().describe("Pixels. Null when unknown."),
+  mimeType: z.string(),
   sizeInBytes: z.number().int(),
   createdAt: coercedDate,
 });
+
+/**
+ * Fails to compile when a column of `media` is missing from the schema or
+ * reads differently.
+ */
+export type MediaSelectMatchesTable = Expect<
+  Equal<z.output<typeof MediaSelectSchema>, typeof MediaTable.$inferSelect>
+>;
 
 export const MediaListItemSchema = MediaSelectSchema.extend({
   postCount: z
@@ -52,8 +67,11 @@ export const MediaListItemSchema = MediaSelectSchema.extend({
   revisionOnlyPostCount: z
     .number()
     .describe(
-      "How many posts use the image only in a Post Revision, not in the draft or the published version. Restoring such a revision brings the image back, so an image with postCount or revisionOnlyPostCount above 0 cannot be deleted.",
+      "How many posts use the image only in a Post Revision, not in the draft or the published version. Restoring such a revision brings the image back, so an image with postCount, revisionOnlyPostCount or momentCount above 0 cannot be deleted.",
     ),
+  momentCount: z
+    .number()
+    .describe("How many Moments show the image among their images."),
   isCover: z
     .boolean()
     .describe("True when a post uses the image as its cover."),
@@ -73,7 +91,7 @@ export const MediaStatsSchema = z.object({
     .number()
     .int()
     .describe(
-      "Images no post uses (draft, published version or Post Revision) and no Admin has as an avatar.",
+      "Images no post uses (draft, published version or Post Revision), no Moment shows and no Admin has as an avatar.",
     ),
   totalBytes: z.number().int(),
 });
@@ -91,6 +109,16 @@ export const LinkedPostSchema = z.object({
     .describe(
       "True when only Post Revisions of the post use the image, not its draft or published version. Restoring such a revision brings the image back, so it still counts as in use.",
     ),
+});
+
+export const LinkedMomentSchema = z.object({
+  id: z.number().int(),
+  title: z
+    .string()
+    .describe(
+      "The start of the Moment's text on one line, or 图片动态 / Image moment (by the request's language) when it has no text.",
+    ),
+  postedAt: coercedDate.describe("When the Moment was first posted."),
 });
 
 export const DeleteMediaResultSchema = z.object({ success: z.boolean() });
@@ -124,11 +152,19 @@ export const UpdateMediaNameInputSchema = z.strictObject({
   ),
 });
 
+export type { MediaSort } from "@/features/media/utils/media.utils";
+
 export const GetMediaListInputSchema = z.strictObject({
   cursor: IdCursorSchema.optional(),
   limit: pageLimitSchema(100).optional(),
   search: z.string().optional(),
   unusedOnly: z.boolean().optional(),
+  sort: z
+    .enum(MEDIA_SORTS)
+    .optional()
+    .describe(
+      "Order of the list. newest (the default) is the latest upload first, oldest the earliest upload first, largest the biggest file first (equal sizes fall back to newest first). Pass the same sort with each nextCursor: a cursor continues the list in the order it came from.",
+    ),
 });
 
 export const ImportMediaUrlInputSchema = z.strictObject({

@@ -1,9 +1,9 @@
 import { useMediaQuery } from "@/hooks/use-motion";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { getRouteApi, Link, useLocation } from "@tanstack/react-router";
+import { Link, useLocation, useSearch } from "@tanstack/react-router";
 import { CircleAlert, LogIn } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { toast } from "@/lib/toast";
 import { Turnstile, useTurnstile } from "@/components/common/turnstile";
 import { Button, buttonClass } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,11 +11,12 @@ import { useComments } from "@/features/comments/hooks/use-comments";
 import { useCommentComposer } from "@/features/comments/hooks/use-comment-composer";
 import { useMutedUsers } from "@/features/muted-users/hooks/use-muted-users";
 import { useScrollToComment } from "@/features/comments/hooks/use-scroll-to-comment";
+import type { CommentTarget } from "@/features/comments/comment-target";
 import {
   commentThreadQuery,
-  rootCommentsByPostIdInfiniteQuery,
+  rootCommentsInfiniteQuery,
 } from "@/features/comments/queries";
-import { useSession } from "@/lib/auth/auth-client";
+import { useSession } from "@/features/auth/hooks/use-session";
 import { Callout } from "@/components/ui/callout";
 import { m } from "@/paraglide/messages";
 import { CommentConfirmationModal } from "./comment-confirmation-modal";
@@ -25,18 +26,25 @@ import { CommentReveal } from "./comment-reveal";
 import { CommentAvatar } from "./comment-avatar";
 import "./comments.css";
 
-const routeApi = getRouteApi("/_public/post/$slug");
 const LOCATE_TOAST = "locate-comment";
 const LOCATE_DELAY_MS = 300;
 
 interface CommentSectionProps {
-  postId: number;
+  /** The Post or the Moment whose Comments this section shows. */
+  target: CommentTarget;
 }
 
-export function CommentSection({ postId }: CommentSectionProps) {
+/**
+ * A Post's or a Moment's Comments (ADR 0037): the same section for both,
+ * reading `?comment=` from whichever page it sits on (ADR 0015).
+ */
+export function CommentSection({ target }: CommentSectionProps) {
   const { data: session } = useSession();
-  const { comment: commentId } = routeApi.useSearch();
-  const listQuery = useInfiniteQuery(rootCommentsByPostIdInfiniteQuery(postId));
+  const commentId = useSearch({
+    strict: false,
+    select: (search) => (search as { comment?: number }).comment,
+  });
+  const listQuery = useInfiniteQuery(rootCommentsInfiniteQuery(target));
   const {
     data,
     isPending: isLoading,
@@ -47,7 +55,7 @@ export function CommentSection({ postId }: CommentSectionProps) {
   const location = useLocation();
   const compactChallenge = useMediaQuery("(max-width: 380px)");
   const threadQuery = useQuery({
-    ...commentThreadQuery(postId, commentId ?? 0),
+    ...commentThreadQuery(target, commentId ?? 0),
     enabled: commentId != null,
   });
 
@@ -61,10 +69,10 @@ export function CommentSection({ postId }: CommentSectionProps) {
 
   const [locallyMuted, setLocallyMuted] = useState(false);
   const { createComment, deleteComment, isCreating, isDeleting } = useComments(
-    postId,
+    target,
     { onMuted: () => setLocallyMuted(true) },
   );
-  const { muteUser, unmuteUser, isMuting, isUnmuting } = useMutedUsers(postId);
+  const { muteUser, unmuteUser, isMuting, isUnmuting } = useMutedUsers(target);
 
   const [localReveal, setLocalReveal] = useState<{
     rootId: number;
@@ -81,7 +89,7 @@ export function CommentSection({ postId }: CommentSectionProps) {
   useEffect(() => {
     setLocalReveal(null);
     setLocallyMuted(false);
-  }, [postId, session?.user.id]);
+  }, [target.type, target.id, session?.user.id]);
   const loginReturn = (id?: number) => {
     const params = new URLSearchParams(location.searchStr);
     if (id != null) params.set("comment", String(id));
@@ -143,7 +151,7 @@ export function CommentSection({ postId }: CommentSectionProps) {
     startRoot,
     startReply,
   } = useCommentComposer({
-    postId,
+    target,
     userId: session?.user.id,
     isCreating,
     createComment,
@@ -305,7 +313,7 @@ export function CommentSection({ postId }: CommentSectionProps) {
       )}
       <CommentList
         rootComments={rootComments}
-        postId={postId}
+        target={target}
         onReply={(rootIdArg, commentIdArg, userName) => {
           startReply({
             rootId: rootIdArg,
@@ -400,31 +408,29 @@ export function CommentSection({ postId }: CommentSectionProps) {
   );
 }
 
+/**
+ * The section while its comments load: its heading, and the boxes of what
+ * most often follows, each as tall as the real thing: the line that invites
+ * a reader to sign in, and the one line a Post without comments has in
+ * place of a list. Such a Post, the usual case, then loads without moving
+ * what comes after the section; one with comments grows from there.
+ */
 function CommentSectionSkeleton() {
   return (
-    <div className="space-y-6">
-      <Skeleton className="h-7 w-24" />
-      <Skeleton className="h-32 w-full rounded-(--fuwari-radius-large)" />
-      <div className="space-y-0">
-        {[1, 2, 3].map((i) => (
-          <div
-            key={i}
-            className="py-6 flex gap-4 border-b border-black/5 dark:border-white/5"
-          >
-            <Skeleton className="w-9 h-9 rounded-full shrink-0" />
-            <div className="flex-1 space-y-3">
-              <div className="flex items-center justify-between">
-                <Skeleton className="h-4 w-20 rounded" />
-                <Skeleton className="h-3 w-16 rounded" />
-              </div>
-              <div className="space-y-1.5">
-                <Skeleton className="h-3.5 w-full rounded" />
-                <Skeleton className="h-3.5 w-3/4 rounded" />
-              </div>
-            </div>
-          </div>
-        ))}
+    <section className="comments-section" aria-busy="true">
+      <h2>{m.comments_heading()}</h2>
+      <div className="comments-login">
+        {/* As the line of text it stands for: it takes the room left. */}
+        <div className="min-w-35 flex-1">
+          <Skeleton className="h-3.5 w-48 max-w-full rounded" />
+        </div>
+        <Skeleton className="h-11 w-28 rounded-(--theme-button-radius)" />
       </div>
-    </div>
+      <div className="fuwari-empty" data-size="compact">
+        <div className="flex h-[1lh] items-center">
+          <Skeleton className="h-3.5 w-40 rounded" />
+        </div>
+      </div>
+    </section>
   );
 }

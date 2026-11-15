@@ -1,15 +1,82 @@
-import { createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
-import { COMMENT_STATUSES, CommentsTable } from "@/lib/db/schema";
+import { ADMIN_COMMENT_VIEWS } from "@/features/comments/admin-comments-search";
+import { SEARCH_TEXT_MAX_LENGTH } from "@/lib/constants";
+import type { CommentsTable } from "@/lib/db/schema";
+import { COMMENT_STATUSES } from "@/lib/enum-values";
 import { PageOffsetSchema, pageLimitSchema } from "@/lib/orpc/pagination";
 import { coercedDate } from "@/lib/orpc/dates";
 import { PathIdSchema } from "@/lib/orpc/path-ids";
+import type { Equal, Expect } from "@/lib/type-equal";
 
 /** A Comment as public APIs return it; when an Admin handled it stays private. */
-export const CommentSelectSchema = createSelectSchema(CommentsTable, {
+export const CommentSelectSchema = z.object({
+  id: z.int(),
+  content: z.string().nullable(),
+  rootId: z.int().nullable(),
+  replyToCommentId: z.int().nullable(),
+  status: z.enum(COMMENT_STATUSES),
+  postId: z
+    .int()
+    .describe("The Post the Comment is on; null for a Moment's Comment.")
+    .nullable(),
+  momentId: z
+    .int()
+    .describe("The Moment the Comment is on; null for a Post's Comment.")
+    .nullable(),
+  userId: z.string().nullable(),
   createdAt: coercedDate,
   updatedAt: coercedDate,
-}).omit({ handledAt: true });
+});
+
+/**
+ * Fails to compile when a column of `comments` is missing from the schema or
+ * reads differently. `handledAt` is left out: it is Admin-only.
+ */
+export type CommentSelectMatchesTable = Expect<
+  Equal<
+    z.output<typeof CommentSelectSchema>,
+    Omit<typeof CommentsTable.$inferSelect, "handledAt">
+  >
+>;
+
+/**
+ * The Post or the Moment a public comment call is about, named in its path
+ * (ADR 0037). The Post and Moment procedures take the same input around it;
+ * every rule is the same for both, except that a Post takes Comments only
+ * while it has a Public Content Snapshot.
+ */
+const postTarget = { postId: PathIdSchema };
+const momentTarget = { momentId: PathIdSchema };
+type CommentTargetShape = typeof postTarget | typeof momentTarget;
+
+const pageFields = {
+  offset: PageOffsetSchema.optional(),
+  limit: pageLimitSchema(100).optional(),
+};
+
+function rootsInput<T extends CommentTargetShape>(target: T) {
+  return z.object({ ...target, ...pageFields });
+}
+
+function repliesInput<T extends CommentTargetShape>(target: T) {
+  return z.object({ ...target, rootId: PathIdSchema, ...pageFields });
+}
+
+function threadInput<T extends CommentTargetShape>(target: T) {
+  return z.object({ ...target, id: PathIdSchema });
+}
+
+// Authed User API Schemas
+const CommentBodySchema = z.string().trim().min(1);
+
+function createInput<T extends CommentTargetShape>(target: T) {
+  return z.object({
+    ...target,
+    content: CommentBodySchema,
+    rootId: z.number().optional(),
+    replyToCommentId: z.number().optional(),
+  });
+}
 
 // User info schema for joined queries
 const CommentUserSchema = z.object({
@@ -39,18 +106,11 @@ const CommentWithUserSchema = CommentSelectSchema.extend({
 });
 
 // Public API Schemas
-export const GetCommentsByPostIdInputSchema = z.object({
-  postId: PathIdSchema,
-  offset: PageOffsetSchema.optional(),
-  limit: pageLimitSchema(100).optional(),
-});
+export const GetCommentsByPostIdInputSchema = rootsInput(postTarget);
+export const GetCommentsByMomentIdInputSchema = rootsInput(momentTarget);
 
-export const GetRepliesByRootIdInputSchema = z.object({
-  postId: PathIdSchema,
-  rootId: PathIdSchema,
-  offset: PageOffsetSchema.optional(),
-  limit: pageLimitSchema(100).optional(),
-});
+export const GetRepliesByRootIdInputSchema = repliesInput(postTarget);
+export const GetMomentRepliesByRootIdInputSchema = repliesInput(momentTarget);
 
 const ReplyWithUserAndReplyToSchema = CommentWithUserSchema.extend({
   replyTo: z
@@ -76,28 +136,35 @@ export const GetRootCommentsResponseSchema = z.object({
   total: z
     .number()
     .describe(
-      "Total published comments on this post, including roots and replies but excluding deleted placeholders. This is not the number of paginated root threads.",
+      "Total published comments on this Post or Moment, including roots and replies but excluding deleted placeholders. This is not the number of paginated root threads.",
     ),
   viewerMuted: z.boolean(),
 });
 
-// Authed User API Schemas
-const CommentBodySchema = z.string().trim().min(1);
-
-export const CreateCommentInputSchema = z.object({
-  postId: PathIdSchema,
-  content: CommentBodySchema,
-  rootId: z.number().optional(),
-  replyToCommentId: z.number().optional(),
-});
+export const CreateCommentInputSchema = createInput(postTarget);
+export const CreateMomentCommentInputSchema = createInput(momentTarget);
 
 export const DeleteCommentInputSchema = z.object({
   id: PathIdSchema,
 });
 
-export const GetThreadByCommentIdInputSchema = z.object({
-  postId: PathIdSchema,
-  id: PathIdSchema,
+export const GetThreadByCommentIdInputSchema = threadInput(postTarget);
+export const GetMomentThreadByCommentIdInputSchema = threadInput(momentTarget);
+
+/** One of the current User's Comments, with what names the page it is on. */
+export const MyCommentSchema = CommentSelectSchema.extend({
+  momentTitle: z
+    .string()
+    .nullable()
+    .describe(
+      "For a Moment's Comment, the start of the Moment's text, or what the Moment holds when it has no text; null for a Post's Comment.",
+    ),
+  commentPath: z
+    .string()
+    .nullable()
+    .describe(
+      "The Comment's public link, /post/{slug}?comment={id} or /moments/{momentId}?comment={id}; null while its Post is not public.",
+    ),
 });
 
 export const GetMyCommentsInputSchema = z.object({
@@ -115,14 +182,99 @@ export const CommentsHandledCountSchema = z.object({
   count: z.number().int().nonnegative(),
 });
 
+export type { AdminCommentView } from "@/features/comments/admin-comments-search";
+
+/** Comments per page on the Admin's Comments page, unless a caller asks for fewer. */
+export const ADMIN_COMMENTS_PAGE_SIZE = 20;
+
+export const AdminCommentsInputSchema = z.strictObject({
+  view: z
+    .enum(ADMIN_COMMENT_VIEWS)
+    .default("all")
+    .describe(
+      "unreplied: the visitor Comments the dashboard counts as awaiting a reply; all: every published Comment.",
+    ),
+  search: z
+    .string()
+    .trim()
+    .max(SEARCH_TEXT_MAX_LENGTH)
+    .optional()
+    .describe("Matches the author's name or the body, ignoring case."),
+  postId: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Only the Comments on this Post."),
+  offset: PageOffsetSchema.optional(),
+  limit: pageLimitSchema(100).optional(),
+});
+
+/** A published Comment as the Admin's Comments page lists it. */
+export const AdminCommentSchema = z.object({
+  id: z.number().int().positive(),
+  content: z.string().nullable(),
+  postId: z.number().int().positive().nullable(),
+  momentId: z.number().int().positive().nullable(),
+  rootId: z.number().int().positive().nullable(),
+  replyToCommentId: z.number().int().positive().nullable(),
+  createdAt: coercedDate,
+  author: z.object({
+    id: z.string().nullable(),
+    name: z.string().nullable(),
+    image: z.string().nullable(),
+    isAdmin: z.boolean(),
+    muted: z.boolean(),
+  }),
+  /** Whom a reply answers; null for a root Comment. */
+  replyToName: z.string().nullable(),
+  /** The Post's public title (its draft title while it is not public), or the Moment's heading. */
+  pageTitle: z.string(),
+  /** The Comment's public link; null while its Post is not public. */
+  commentPath: z.string().nullable(),
+  /** A published Admin Comment answers it. */
+  answered: z.boolean(),
+  /** An Admin replied to it or marked it handled. */
+  handled: z.boolean(),
+  /** It is on the unreplied list the dashboard and the sidebar count. */
+  awaitingReply: z.boolean(),
+});
+
+export const AdminCommentsPageSchema = z.object({
+  items: z.array(AdminCommentSchema),
+  /** Every Comment the view, search and filter match, not only this page's. */
+  total: z.number().int().nonnegative(),
+});
+
+/** A Post that has published Comments, for the Comments page's filter. */
+export const AdminCommentedPostSchema = z.object({
+  id: z.number().int().positive(),
+  title: z.string(),
+  comments: z.number().int().positive(),
+});
+
 // Types
-export type GetCommentsByPostIdInput = z.infer<
-  typeof GetCommentsByPostIdInputSchema
->;
-export type CreateCommentInput = z.infer<typeof CreateCommentInputSchema>;
+// A Post's or a Moment's: the services take either.
+export type GetRootCommentsInput =
+  | z.infer<typeof GetCommentsByPostIdInputSchema>
+  | z.infer<typeof GetCommentsByMomentIdInputSchema>;
+export type GetRepliesByRootIdInput =
+  | z.infer<typeof GetRepliesByRootIdInputSchema>
+  | z.infer<typeof GetMomentRepliesByRootIdInputSchema>;
+export type GetThreadByCommentIdInput =
+  | z.infer<typeof GetThreadByCommentIdInputSchema>
+  | z.infer<typeof GetMomentThreadByCommentIdInputSchema>;
+export type CreateCommentInput =
+  | z.infer<typeof CreateCommentInputSchema>
+  | z.infer<typeof CreateMomentCommentInputSchema>;
 export type DeleteCommentInput = z.infer<typeof DeleteCommentInputSchema>;
 export type GetMyCommentsInput = z.infer<typeof GetMyCommentsInputSchema>;
+export type MyComment = z.infer<typeof MyCommentSchema>;
 export type RootCommentWithReplyCount = z.infer<
   typeof RootCommentWithReplyCountSchema
 >;
 export type CommentWithUser = z.infer<typeof CommentWithUserSchema>;
+export type AdminCommentsInput = z.input<typeof AdminCommentsInputSchema>;
+export type AdminComment = z.infer<typeof AdminCommentSchema>;
+export type AdminCommentsPage = z.infer<typeof AdminCommentsPageSchema>;
+export type AdminCommentedPost = z.infer<typeof AdminCommentedPostSchema>;

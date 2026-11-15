@@ -2,25 +2,21 @@ import jetbrainsMonoCss from "@fontsource-variable/jetbrains-mono/wght.css?url";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import katexCss from "katex/dist/katex.min.css?url";
-import { z } from "zod";
 import { NotFound } from "@/components/common/not-found";
 import { siteConfigQuery, siteDomainQuery } from "@/features/config/queries";
 import { PostPage } from "@/features/posts/components/post-page";
 import { PostPageSkeleton } from "@/features/posts/components/post-page-skeleton";
 import { adjacentPostsQuery, postBySlugQuery } from "@/features/posts/queries";
 import { jsonContentHasType } from "@/features/posts/utils/content";
+import { commentSearchSchema } from "@/lib/public-search";
 import {
   buildArticleJsonLd,
   buildCanonicalUrl,
   canonicalLink,
 } from "@/lib/seo";
 
-const searchSchema = z.object({
-  comment: z.coerce.number().optional(),
-});
-
 export const Route = createFileRoute("/_public/post/$slug")({
-  validateSearch: searchSchema,
+  validateSearch: commentSearchSchema,
   component: RouteComponent,
   notFoundComponent: NotFound,
   loader: async ({ context, params }) => {
@@ -103,9 +99,10 @@ export const Route = createFileRoute("/_public/post/$slug")({
 
 function RouteComponent() {
   const { slug } = Route.useParams();
+  const { canonicalHref } = Route.useLoaderData();
   const { data: post } = useSuspenseQuery(postBySlugQuery(slug));
 
   if (!post) throw notFound();
 
-  return <PostPage post={post} />;
+  return <PostPage post={post} canonicalHref={canonicalHref} />;
 }

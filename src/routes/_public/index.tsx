@@ -1,26 +1,19 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { z } from "zod";
 import { getHomeBackgroundPreloadImages } from "@/components/layout/preload-images";
 import { siteDomainQuery } from "@/features/config/queries";
+import { latestMomentsQuery } from "@/features/moments/queries";
 import {
   HomePage,
   POPULAR_POSTS_LIMIT,
 } from "@/features/posts/components/home-page";
 import { HomePageSkeleton } from "@/features/posts/components/home-page-skeleton";
 import { popularPostsQuery, homePostsQuery } from "@/features/posts/queries";
+import { pageSearchSchema } from "@/lib/public-search";
 import { buildCanonicalUrl, canonicalLink } from "@/lib/seo";
 
 export const Route = createFileRoute("/_public/")({
-  validateSearch: z.object({
-    page: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(1_000_000)
-      .optional()
-      .catch(undefined),
-  }),
+  validateSearch: pageSearchSchema,
   loaderDeps: ({ search }) => ({ page: search.page ?? 1 }),
   loader: async ({ context, deps }) => {
     const [posts, domain] = await Promise.all([
@@ -29,6 +22,7 @@ export const Route = createFileRoute("/_public/")({
       context.queryClient.ensureQueryData(
         popularPostsQuery(POPULAR_POSTS_LIMIT),
       ),
+      context.queryClient.ensureQueryData(latestMomentsQuery),
     ]);
 
     if (posts.page !== deps.page) {
